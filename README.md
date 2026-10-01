@@ -34,6 +34,14 @@ $env:MongoDB__TenantId = '<your-tenant-id>'
 $env:MongoDB__ClusterName = '<your-cluster-name>'
 ```
 
+A placeholder-only [`.env.example`](.env.example) lists every overridable key. Copy it to `.env` and fill it in:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Note that .NET does **not** read `.env` files automatically. Either export the values into the process first (`set -a; source .env; set +a` on bash/zsh) or set the variables directly as shown above. `.env` is git-ignored; `.env.example` must stay placeholder-only.
+
 For an interactive passwordless run, sign in to the intended Azure identity with `az login`; confirm the resource permissions and database identity independently.
 
 ### 3. Install/build when you are ready
