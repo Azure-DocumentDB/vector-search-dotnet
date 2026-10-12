@@ -1,0 +1,27 @@
+name: Build, local tests and dependency audit
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+      - run: dotnet restore tests/DocumentDBVectorSearch.Tests.csproj --locked-mode --no-http-cache
+      - run: dotnet build tests/DocumentDBVectorSearch.Tests.csproj --no-restore --configuration Release
+      - run: dotnet test tests/DocumentDBVectorSearch.Tests.csproj --no-restore --no-build --configuration Release --filter 'Category!=Live'
+      - run: python3 -m unittest discover -s tools -p 'test_*.py'
+      - run: python3 tools/check-vulnerabilities.py
+# No Azure login, cloud deployment, database credentials or live test permission in CI.

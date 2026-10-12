@@ -1,174 +1,96 @@
-using Azure.AI.OpenAI;
-using Azure.Identity;
 using DocumentDBVectorSamples.Models;
-using Microsoft.Extensions.Logging;
 using MongoDB.Bson;
-using MongoDB.Driver;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
-using System.Reflection;
 
-namespace DocumentDBVectorSamples.Services.VectorSearch;
+namespace DocumentDBVectorSamples.Services;
 
-/// <summary>
-/// Service for performing vector similarity searches using different algorithms (IVF, HNSW, DiskANN).
-/// Handles data loading, vector index creation, query embedding generation, and search execution.
-/// </summary>
-public class VectorSearchService
+public sealed class VectorSearchService(IVectorStore store)
 {
-    private readonly ILogger<VectorSearchService> _logger;
-    private readonly AzureOpenAIClient _openAIClient;
-    private readonly MongoDbService _mongoService;
-    private readonly AppConfiguration _config;
-
-    public VectorSearchService(ILogger<VectorSearchService> logger, MongoDbService mongoService, AppConfiguration config)
+    public async Task<SearchReport> RunAsync(VectorIndexType type, Fixture fixture, bool allowWrites, CancellationToken ct)
     {
-        _logger = logger;
-        _mongoService = mongoService;
-        _config = config;
-        
-        // Initialize Azure OpenAI client with passwordless authentication
-        var credentialOptions = new DefaultAzureCredentialOptions();
-        if (!string.IsNullOrEmpty(_config.AzureOpenAI.TenantId))
+        if (!allowWrites) throw new ConfigurationException("Database writes require explicit opt-in.");
+        var index = VectorSchema.Index(type);
+        VectorSchema.CheckCatalog(await store.ListIndexesAsync(ct), index);
+        var inserted = 0;
+        foreach (var document in fixture.Documents)
         {
-            credentialOptions.TenantId = _config.AzureOpenAI.TenantId;
-        }
-        var credential = new DefaultAzureCredential(credentialOptions);
-        _openAIClient = new AzureOpenAIClient(new Uri(_config.AzureOpenAI.Endpoint), credential);
-    }
-
-    /// <summary>
-    /// Executes a complete vector search workflow: data setup, index creation, query embedding, and search
-    /// </summary>
-    /// <param name="indexType">The vector search algorithm to use (IVF, HNSW, or DiskANN)</param>
-    public async Task RunSearchAsync(VectorIndexType indexType)
-    {
-        try
-        {
-            _logger.LogInformation($"Starting {indexType} vector search workflow");
-            
-            // Setup collection
-            var collectionSuffix = indexType switch 
-            { 
-                VectorIndexType.IVF => "ivf", 
-                VectorIndexType.HNSW => "hnsw", 
-                VectorIndexType.DiskANN => "diskann", 
-                _ => throw new ArgumentException($"Unknown index type: {indexType}") 
-            };
-            var collectionName = $"hotels_{collectionSuffix}";
-            var indexName = $"vectorIndex_{collectionSuffix}";
-            
-            var collection = _mongoService.GetCollection<HotelData>(_config.VectorSearch.DatabaseName, collectionName);
-            
-            // Load data from file if collection is empty
-            var assemblyLocation = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? string.Empty;
-            var dataFilePath = Path.Combine(assemblyLocation, _config.DataFiles.WithVectors);
-            await _mongoService.LoadDataIfNeededAsync(collection, dataFilePath);
-
-            // Create the vector index with algorithm-specific search options
-            var searchOptions = indexType switch
+            ct.ThrowIfCancellationRequested();
+            var id = document["_id"].AsString;
+            if (await store.ContainsIdAsync(id, ct)) continue;
+            try { await store.InsertAsync(document, ct); inserted++; }
+            catch (DuplicateDocumentException)
             {
-                VectorIndexType.IVF => CreateIVFSearchOptions(_config.Embedding.Dimensions),
-                VectorIndexType.HNSW => CreateHNSWSearchOptions(_config.Embedding.Dimensions),
-                VectorIndexType.DiskANN => CreateDiskANNSearchOptions(_config.Embedding.Dimensions),
-                _ => throw new ArgumentException($"Unknown index type: {indexType}")
-            };
-            
-            await _mongoService.CreateVectorIndexAsync(
-                _config.VectorSearch.DatabaseName, collectionName, indexName,
-                _config.Embedding.EmbeddedField, searchOptions);
-            
-            _logger.LogInformation($"Vector index '{indexName}' is ready for {indexType} search");
-            await Task.Delay(5000); // Allow index to be fully initialized
-
-            // Create embedding for the query
-            var embeddingClient = _openAIClient.GetEmbeddingClient(_config.AzureOpenAI.EmbeddingModel);
-            var queryEmbedding = (await embeddingClient.GenerateEmbeddingAsync(_config.VectorSearch.Query)).Value.ToFloats().ToArray();
-            _logger.LogInformation($"Generated query embedding with {queryEmbedding.Length} dimensions");
-
-            // Build MongoDB aggregation pipeline for vector search
-            var searchPipeline = new BsonDocument[]
-            {
-                // Vector similarity search using cosmosSearch
-                new BsonDocument("$search", new BsonDocument
-                {
-                    ["cosmosSearch"] = new BsonDocument
-                    {
-                        ["vector"] = new BsonArray(queryEmbedding.Select(f => new BsonDouble(f))),
-                        ["path"] = _config.Embedding.EmbeddedField,  // Field containing embeddings
-                        ["k"] = _config.VectorSearch.TopK           // Number of results to return
-                    }
-                }),
-                // Project results with similarity scores
-                new BsonDocument("$project", new BsonDocument
-                {
-                    ["score"] = new BsonDocument("$meta", "searchScore"),
-                    ["document"] = "$$ROOT"
-                })
-            };
-
-            // Execute and process the search
-            _logger.LogInformation($"Executing {indexType} vector search for top {_config.VectorSearch.TopK} results");
-            var searchResults = (await collection.AggregateAsync<BsonDocument>(searchPipeline)).ToList()
-                .Select(result => new SearchResult 
-                { 
-                    Document = MongoDB.Bson.Serialization.BsonSerializer.Deserialize<HotelData>(result["document"].AsBsonDocument), 
-                    Score = result["score"].AsDouble 
-                }).ToList();
-
-            // Print the results
-            if (searchResults?.Count == 0) 
-            { 
-                _logger.LogInformation("❌ No search results found. Check query terms and data availability."); 
-            }
-            else
-            {
-                _logger.LogInformation($"\n✅ Search Results ({searchResults!.Count} found using {indexType}):");
-                for (int i = 0; i < searchResults.Count; i++)
-                {
-                    var result = searchResults[i];
-                    var hotelName = result.Document?.HotelName ?? "Unknown Hotel";
-                    _logger.LogInformation($"  {i + 1}. {hotelName} (Similarity: {result.Score:F4})");
-                }
+                // Only tolerate an exact _id race; other unique-index conflicts are real failures.
+                if (!await store.ContainsIdAsync(id, ct)) throw;
             }
         }
-        catch (Exception ex)
+        // Always ensure/verify the index, even for a populated collection.
+        if (!VectorSchema.CheckCatalog(await store.ListIndexesAsync(ct), index))
+            await store.CreateIndexAsync(index, ct);
+        if (!VectorSchema.CheckCatalog(await store.ListIndexesAsync(ct), index)) throw new VerificationException();
+
+        // Bounded readiness retries; cancellation and real command failures always propagate.
+        IReadOnlyList<BsonDocument> results = [];
+        for (var attempt = 0; attempt < 12; attempt++)
         {
-            _logger.LogError(ex, $"{indexType} vector search failed");
-            throw;
+            results = await store.SearchAsync(VectorSchema.Pipeline(fixture.Query), ct);
+            if (results.Count == 5 && results[0].GetValue("_id", "") == fixture.ExpectedId) break;
+            if (attempt < 11) await Task.Delay(TimeSpan.FromSeconds(2), ct);
         }
+        if (results.Count != 5 || results[0].GetValue("_id", "") != fixture.ExpectedId ||
+            results.Select(r => r.GetValue("_id", "")).Distinct().Count() != 5 ||
+            results.Any(r => !r.Contains("score") || !double.IsFinite(r["score"].ToDouble())) ||
+            Math.Abs(results[0]["score"].ToDouble() - 1.0) > 0.001)
+            throw new VerificationException();
+        return new SearchReport(type.Suffix(), inserted, fixture.Documents.Count - inserted, results.Count,
+            results[0]["_id"].AsString, true, "precomputed fixture self-match; no model call or semantic-quality claim");
+    }
+}
+
+public sealed record SearchReport(string Algorithm, int Inserted, int Preserved, int Results,
+    string FirstId, bool IndexVerified, string Validation);
+
+public static class VectorSchema
+{
+    public static BsonDocument Index(VectorIndexType type)
+    {
+        var options = new BsonDocument { ["kind"] = "vector-" + type.Suffix(), ["similarity"] = "COS", ["dimensions"] = Fixture.Dimensions };
+        switch (type)
+        {
+            case VectorIndexType.IVF: options["numLists"] = 1; break;
+            case VectorIndexType.HNSW: options["m"] = 16; options["efConstruction"] = 64; break;
+            case VectorIndexType.DiskANN: break;
+            default: throw new ConfigurationException("Unknown algorithm.");
+        }
+        return new BsonDocument { ["name"] = "dotnet_vector_" + type.Suffix(),
+            ["key"] = new BsonDocument(Fixture.VectorField, "cosmosSearch"), ["cosmosSearchOptions"] = options };
     }
 
-    /// <summary>
-    /// Creates IVF (Inverted File) search options - good for large datasets with fast approximate search
-    /// </summary>
-    private BsonDocument CreateIVFSearchOptions(int dimensions) => new BsonDocument
+    public static bool CheckCatalog(IReadOnlyList<BsonDocument> catalog, BsonDocument expected)
     {
-        ["kind"] = "vector-ivf",
-        ["similarity"] = "COS",
-        ["dimensions"] = dimensions,
-        ["numLists"] = 1
-    };
+        var found = false;
+        foreach (var actual in catalog)
+        {
+            var sameName = actual.GetValue("name", "") == expected["name"];
+            var vector = actual.TryGetValue("key", out var key) && key.IsBsonDocument &&
+                key.AsBsonDocument.Elements.Any(e => e.Value == "cosmosSearch");
+            if (!sameName && !vector) continue;
+            if (!sameName || actual.GetValue("unique", false) == true || actual.GetValue("sparse", false) == true ||
+                actual.Contains("partialFilterExpression") || actual.Contains("expireAfterSeconds") ||
+                !actual.TryGetValue("key", out var actualKey) || actualKey != expected["key"] ||
+                !actual.TryGetValue("cosmosSearchOptions", out var options) || !options.IsBsonDocument ||
+                !expected["cosmosSearchOptions"].AsBsonDocument.All(e =>
+                    options.AsBsonDocument.TryGetValue(e.Name, out var value) && value == e.Value))
+                throw new IndexConflictException();
+            found = true;
+        }
+        return found;
+    }
 
-    /// <summary>
-    /// Creates HNSW (Hierarchical Navigable Small World) search options - best accuracy/speed balance
-    /// </summary>
-    private BsonDocument CreateHNSWSearchOptions(int dimensions) => new BsonDocument
+    public static BsonDocument[] Pipeline(double[] vector)
     {
-        ["kind"] = "vector-hnsw",
-        ["similarity"] = "COS",
-        ["dimensions"] = dimensions,
-        ["m"] = 16,
-        ["efConstruction"] = 64
-    };
-
-    /// <summary>
-    /// Creates DiskANN search options - optimized for very large datasets stored on disk
-    /// </summary>
-    private BsonDocument CreateDiskANNSearchOptions(int dimensions) => new BsonDocument
-    {
-        ["kind"] = "vector-diskann",
-        ["similarity"] = "COS",
-        ["dimensions"] = dimensions
-    };
+        Fixture.ValidateVector(vector);
+        return [new BsonDocument("$search", new BsonDocument("cosmosSearch", new BsonDocument
+                { ["vector"] = new BsonArray(vector), ["path"] = Fixture.VectorField, ["k"] = 5 })),
+            new BsonDocument("$project", new BsonDocument { ["_id"] = 1, ["score"] = new BsonDocument("$meta", "searchScore") })];
+    }
 }

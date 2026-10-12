@@ -15,7 +15,7 @@ Source is at repository root. The README is rewritten for that layout, and place
 
 Hotel fixtures are not redistributed: [data/README.md](data/README.md) pins the original input locations and checksums. Saved output, Learn-only quickstart pages, and devcontainer automation are omitted. Shared infrastructure and root monorepo CI are not copied.
 
-No dependency versions or vector/agent algorithms are intentionally changed. The Go agent module namespace and local data/environment-file paths are adjusted where necessary. Invalid monorepo-only npm entry points are removed rather than advertised as working commands.
+At initial extraction, dependency versions and vector algorithms were retained. Subsequent .NET-specific changes are recorded below; the upstream revision remains the provenance baseline, not a claim that the downstream code is unchanged.
 
 ### Configuration example added (2026-10-01)
 
@@ -32,3 +32,13 @@ application code, dependency versions, or `appsettings.json` defaults were chang
 
 There is no automatic synchronization. Review upstream changes against this pinned baseline, apply only relevant fixes, retain notices, and record the imported revision and local adaptations here.
 Issue/PR history is not transferred. The maintainers of the repository hosting this extraction own its downstream fixes; contribute reusable fixes upstream under its contribution policy.
+
+### Safe deterministic quickstart adaptation (2026-10-12)
+
+The original Microsoft MIT notice and pinned upstream provenance remain unchanged. Downstream code now targets patched .NET 10 LTS; MongoDB.Driver/Azure.Identity and locked transitive dependencies are updated. Unused Newtonsoft/configuration/DI/logging dependencies and DTOs are removed in favor of BSON fixture documents and a small explicit environment configuration.
+
+The original-style C# menu is retained with deterministic CLI commands, EOF handling and nonzero sanitized failures. The default workflow uses a pinned 1536D precomputed fixture query instead of billable embedding calls; both the original .NET fixture and shared upstream comparison fixture are accepted. This validates a synthetic self-match only, not semantic quality.
+
+Explicit disposable namespace/write guards, exact Azure credential destination allowlists, verified TLS, native SCRAM and a real Entra OIDC callback replace implicit database/client setup. Stable-ID insert-only seeding preserves existing/user-modified/unrelated records; populated collections still get catalog-verified indexes. Conflicts fail without dropping or resetting data. Broad all-database index enumeration and automatic embedding-output overwrites are removed. The optional model command only validates a single explicitly requested query embedding and disables redirects; live inference remains unvalidated/blocked on S0 eligibility.
+
+Permanent .NET unit/mocked/CLI safety tests, an explicit six-case Native+OIDC Azure integration gate, current-feed direct/transitive NuGet advisory checks, and pinned read-only GitHub Actions CI are added. No live Azure success is inferred from these code changes or local tests. Shared provisioning remains separately owned and is not copied into this repository.
