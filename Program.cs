@@ -48,7 +48,17 @@ public static class Program
             else throw new ConfigurationException("Unknown command. Use --help.");
 
             var get = environment ?? Environment.GetEnvironmentVariable;
-            if (execute != null) { await execute(command, CancellationToken.None); return 0; }
+            if (execute != null)
+            {
+                if (command == "all")
+                    return await RunCasesAsync(Enum.GetValues<VectorIndexType>(), async (type, ct) =>
+                    {
+                        await execute(type.Suffix(), ct);
+                        return new { Algorithm = type.Suffix(), Status = "PASS" };
+                    }, TimeSpan.FromSeconds(30), output, error);
+                await execute(command, CancellationToken.None);
+                return 0;
+            }
             if (command == "validate-fixture")
             {
                 using var dataTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -74,32 +84,59 @@ public static class Program
             using var client = new MongoClient(ClientFactory.Settings(config));
             var types = command is "all" or "show-indexes" ? Enum.GetValues<VectorIndexType>() :
                 [command switch { "ivf" => VectorIndexType.IVF, "hnsw" => VectorIndexType.HNSW, _ => VectorIndexType.DiskANN }];
-            foreach (var type in types)
+            return await RunCasesAsync(types, async (type, ct) =>
             {
                 var store = new MongoDbService(client.GetDatabase(config.Database), config.Collection(type));
                 if (command == "show-indexes")
                 {
-                    var catalog = await store.ListIndexesAsync(timeout.Token);
+                    var catalog = await store.ListIndexesAsync(ct);
                     var verified = VectorSchema.CheckCatalog(catalog, VectorSchema.Index(type));
-                    await output.WriteLineAsync(JsonSerializer.Serialize(new { Algorithm = type.Suffix(), IndexCount = catalog.Count, IndexVerified = verified }));
+                    return new { Algorithm = type.Suffix(), IndexCount = catalog.Count, IndexVerified = verified };
                 }
-                else await output.WriteLineAsync(JsonSerializer.Serialize(await new VectorSearchService(store).RunAsync(type, fixture!, config.AllowWrites, timeout.Token)));
-            }
-            return 0;
+                return (object)await new VectorSearchService(store).RunAsync(type, fixture!, config.AllowWrites, ct);
+            }, TimeSpan.FromSeconds(config.TimeoutSeconds), output, error);
         }
         catch (Exception ex)
         {
-            var message = ex switch
-            {
-                ConfigurationException => "configuration rejected; check README guards and input files",
-                IndexConflictException => "index conflict; preserved existing index and documents; use a new disposable prefix",
-                VerificationException => "catalog or top-5 fixture self-match verification failed",
-                OperationCanceledException or TimeoutException => "operation timed out or was canceled",
-                _ => "operation failed; check credentials, permissions, network and service support"
-            };
-            // Never emit exception text, URI, credentials, server responses, or stack traces.
-            await error.WriteLineAsync("ERROR: " + message);
+            await error.WriteLineAsync("ERROR: " + SafeError(ex));
             return 1;
         }
     }
+
+    /// <summary>Complete every selected case, emit one result row per case, and aggregate failure status.</summary>
+    public static async Task<int> RunCasesAsync(IEnumerable<VectorIndexType> types,
+        Func<VectorIndexType, CancellationToken, Task<object>> execute, TimeSpan caseTimeout,
+        TextWriter output, TextWriter error, CancellationToken cancellationToken = default)
+    {
+        var failed = false;
+        foreach (var type in types)
+        {
+            // Independent deadlines keep a failed/timed-out earlier case from consuming later cases' budget.
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            deadline.CancelAfter(caseTimeout);
+            try
+            {
+                deadline.Token.ThrowIfCancellationRequested();
+                var result = await execute(type, deadline.Token);
+                await output.WriteLineAsync(JsonSerializer.Serialize(result));
+            }
+            catch (Exception ex)
+            {
+                failed = true;
+                var message = SafeError(ex);
+                await output.WriteLineAsync(JsonSerializer.Serialize(new { Algorithm = type.Suffix(), Status = "FAIL", Error = message }));
+                await error.WriteLineAsync($"ERROR: {type.Suffix()}: {message}");
+            }
+        }
+        return failed ? 1 : 0;
+    }
+
+    private static string SafeError(Exception ex) => ex switch
+    {
+        ConfigurationException => "configuration rejected; check README guards and input files",
+        IndexConflictException => "index conflict; preserved existing index and documents; use a new disposable prefix",
+        VerificationException => "catalog or top-5 fixture self-match verification failed",
+        OperationCanceledException or TimeoutException => "operation timed out or was canceled",
+        _ => "operation failed; check credentials, permissions, network and service support"
+    };
 }

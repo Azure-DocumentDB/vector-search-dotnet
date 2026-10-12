@@ -82,7 +82,7 @@ dotnet run --project DocumentDBVectorSearch.csproj --configuration Release --no-
 dotnet run --project DocumentDBVectorSearch.csproj --configuration Release --no-build
 ```
 
-Errors print a safe category, not exception text, tokens, URI, server replies, or stack traces. Total operation deadline defaults to 300 seconds (`OPERATION_TIMEOUT_SECONDS`, range 30–600); connection/server selection/socket/query deadlines and index readiness retries are also bounded.
+Errors print a safe category, not exception text, tokens, URI, server replies, or stack traces. Each algorithm gets an independent deadline of 300 seconds by default (`OPERATION_TIMEOUT_SECONDS`, range 30–600); fixture loading has the same bounded preparation budget. `all` attempts all three algorithms even after first/middle failures, emits one JSON result row per algorithm (sanitized `Status=FAIL` rows on errors), and exits 1 if any fail. Thus an `all` run may take up to three case deadlines plus preparation; connection/server selection/socket/query deadlines and index readiness retries are also bounded.
 
 ## Microsoft Entra OIDC alternative
 
