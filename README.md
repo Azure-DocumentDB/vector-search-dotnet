@@ -122,3 +122,7 @@ The `embed-query` command requires **all** of `ALLOW_MODEL_CALLS=true`, `AZURE_O
 ## Maintenance and license
 
 See [UPSTREAM.md](UPSTREAM.md) for the exact upstream revision and downstream adaptations. This is independently maintained, not automatically synced. Review dependency advisories and supported SDK patches before live runs. The original Microsoft [MIT notice](LICENSE.md) is unchanged; fixture source/terms are linked in the data guide. No infrastructure templates or provisioning credentials are included.
+
+## Dated validation
+
+See [TESTED.md](TESTED.md) for the real managed-Azure results, authentication/algorithm matrix, local checks and explicit limits.
